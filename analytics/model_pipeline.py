@@ -1,77 +1,74 @@
 import os
-import numpy as np
 import pandas as pd
+import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
 
-DATA_PATH = "analytics/customer_data.csv"
+LOCAL_PATH = "analytics/titanic.csv"
 
-def generate_mock_data():
-    """Generates a reproducible dataset simulating customer metrics."""
-    np.random.seed(42)
-    n_samples = 1000
+def run_model_pipeline():
+    # 1. Load the dataset cached by data_profiler.py
+    if not os.path.exists(LOCAL_PATH):
+        raise FileNotFoundError(
+            f"Dataset not found at {LOCAL_PATH}. Please run data_profiler.py first!"
+        )
     
-    data = {
-        "customer_id": range(10001, 10001 + n_samples),
-        "tenure_months": np.random.randint(1, 72, size=n_samples),
-        "monthly_spend_inr": np.random.uniform(500, 8000, size=n_samples),
-        "support_tickets": np.random.randint(0, 10, size=n_samples),
-        "payment_method": np.random.choice(["Credit Card", "UPI", "Net Banking"], size=n_samples)
-    }
+    df = pd.read_csv(LOCAL_PATH)
+    print("--- Local Dataset Loaded Successfully for Modeling ---")
+    print(f"Initial Dimensions: {df.shape[0]} rows, {df.shape[1]} columns\n")
     
-    df = pd.DataFrame(data)
-    # Define a deterministic target rule with noise for churn prediction
-    churn_prob = (df["support_tickets"] * 0.15) - (df["tenure_months"] * 0.005) + (df["monthly_spend_inr"] * 0.00005)
-    df["churned"] = (churn_prob > np.percentile(churn_prob, 70)).astype(int)
+    # 2. Advanced Feature Engineering & Missing Value Imputation
+    # Extract passenger titles to dynamically fill missing ages accurately
+    df['Title'] = df['Name'].str.extract(' ([A-Za-z]+)\.', expand=False)
+    title_medians = df.groupby('Title')['Age'].transform('median')
+    df['Age'] = df['Age'].fillna(title_medians).fillna(df['Age'].median())
     
-    df.to_csv(DATA_PATH, index=False)
-    print(f"Dataset generated and cached at {DATA_PATH}")
-
-def run_pipeline():
-    if not os.path.exists(DATA_PATH):
-        generate_mock_data()
-        
-    df = pd.read_csv(DATA_PATH)
+    # Fill sparse Embarked records using the calculation mode (most common port)
+    df['Embarked'] = df['Embarked'].fillna(df['Embarked'].mode()[0])
     
-    # --- PHASE 1: Data Profiling & Prep ---
-    print("\n--- Summary Statistics ---")
-    print(df.describe().T)
+    # Combine related parameters into a structural interaction feature tracking family units
+    df['FamilySize'] = df['SibSp'] + df['Parch'] + 1
     
-    print("\n--- Target Class Distribution ---")
-    print(df["churned"].value_counts(normalize=True))
+    # Drop structural text identifiers and columns with extreme sparsity (>75% missing like Cabin)
+    X = df.drop(columns=['PassengerId', 'Survived', 'Name', 'Ticket', 'Cabin', 'Title'])
+    y = df['Survived']
     
-    # Feature Engineering & Encoding
-    X = df[["tenure_months", "monthly_spend_inr", "support_tickets", "payment_method"]].copy()
-    X = pd.get_dummies(X, columns=["payment_method"], drop_first=True)
-    y = df["churned"]
+    # 3. Categorical Conversion & One-Hot Encoding
+    X = pd.get_dummies(X, columns=['Sex', 'Embarked'], drop_first=True)
     
-    # Split
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    # 4. Stratified Train/Test Split (80/20 Balance Rule)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
     
-    # Scale numerical values
+    # 5. Continuous Numerical Feature Scaling
     scaler = StandardScaler()
-    num_cols = ["tenure_months", "monthly_spend_inr", "support_tickets"]
-    X_train[num_cols] = scaler.fit_transform(X_train[num_cols])
-    X_test[num_cols] = scaler.transform(X_test[num_cols])
+    scale_cols = ['Age', 'Fare', 'FamilySize', 'SibSp', 'Parch']
+    X_train[scale_cols] = scaler.fit_transform(X_train[scale_cols])
+    X_test[scale_cols] = scaler.transform(X_test[scale_cols])
     
-    # --- PHASE 2: Modeling ---
-    clf = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=6)
+    # 6. Model Training (Random Forest Classifier)
+    print("Training Random Forest Classifier model...")
+    clf = RandomForestClassifier(n_estimators=100, max_depth=6, random_state=42)
     clf.fit(X_train, y_train)
     
-    # Evaluative Scoring
+    # 7. Model Evaluative Scoring
     y_pred = clf.predict(X_test)
     y_proba = clf.predict_proba(X_test)[:, 1]
     
-    print("\n--- Model Evaluation Summary ---")
+    print("\n=================== CLASSIFICATION REPORT ===================")
     print(classification_report(y_test, y_pred))
-    print(f"ROC-AUC Score: {roc_auc_score(y_test, y_proba):.4f}")
+    print(f"ROC-AUC Performance Score: {roc_auc_score(y_test, y_proba):.4f}")
     
-    # Feature Importances
+    print("\n=================== CONFUSION MATRIX ===================")
+    print(confusion_matrix(y_test, y_pred))
+    
+    # 8. Feature Importance Analysis
     importances = pd.Series(clf.feature_importances_, index=X.columns).sort_values(ascending=False)
-    print("\n--- Top Predictive Factors ---")
+    print("\n=================== FEATURE IMPORTANCE RANKING ===================")
     print(importances)
 
 if __name__ == "__main__":
-    run_pipeline()
+    run_model_pipeline()
